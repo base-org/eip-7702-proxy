@@ -22,7 +22,7 @@ Now the EOA has been upgraded to the smart account implementation and had its st
 If the smart account implementation supports UUPS upgradeability, it will work as designed by submitting upgrade calls to the account.
 
 ### How does it work?
-* `EIP7702Proxy` is constructed with an `initalImplementation` that it will delegate all calls to by default
+* `EIP7702Proxy` is constructed with an `initialImplementation` that it will delegate all calls to by default
 * `EIP7702Proxy` is constructed with a `guardedInitializer`, the initializer selector of the `initialImplementation`
 * Calls to the account on `guardedInitializer` revert and do not delegate the call to the smart account implementation
 * `EIP7702Proxy` defines a new, static selector compatible with all initializers: `initialize(bytes args, bytes signature)`

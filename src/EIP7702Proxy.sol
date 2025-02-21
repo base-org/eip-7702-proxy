@@ -49,7 +49,7 @@ contract EIP7702Proxy is Proxy {
     /// @notice Initialization signature is invalid
     error InvalidSignature();
 
-    /// @notice Call to `GUARDED_INTIALIZER` attempted
+    /// @notice Call to `GUARDED_INITIALIZER` attempted
     error InvalidInitializer();
 
     /// @notice Initializes the proxy with an initial implementation and guarded initializer
