@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.23;
 
-import {EIP7702Proxy} from "../../src/EIP7702Proxy.sol";
-import {NonceTracker} from "../../src/NonceTracker.sol";
-
 import {ECDSA} from "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
 
+import {EIP7702Proxy} from "../../src/EIP7702Proxy.sol";
+import {NonceTracker} from "../../src/NonceTracker.sol";
+import {DefaultReceiver} from "../../src/DefaultReceiver.sol";
+
 import {EIP7702ProxyBase} from "../base/EIP7702ProxyBase.sol";
-import {MockImplementation, FailingSignatureImplementation, RevertingIsValidSignatureImplementation, MockImplementationWithExtraData} from "../mocks/MockImplementation.sol";
+import {
+    MockImplementation,
+    FailingSignatureImplementation,
+    RevertingIsValidSignatureImplementation,
+    MockImplementationWithExtraData
+} from "../mocks/MockImplementation.sol";
+import {MockValidator} from "../mocks/MockValidator.sol";
 
 /**
  * @title IsValidSignatureTestBase
@@ -27,37 +34,22 @@ abstract contract IsValidSignatureTestBase is EIP7702ProxyBase {
         wallet = _eoa;
     }
 
-    function test_succeeds_withValidEOASignature(
-        bytes32 message
-    ) public virtual {
+    function test_succeeds_withValidEOASignature(bytes32 message) public virtual {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(_EOA_PRIVATE_KEY, message);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
-        assertEq(
-            result,
-            ERC1271_MAGIC_VALUE,
-            "Should accept valid EOA signature"
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
+        assertEq(result, ERC1271_MAGIC_VALUE, "Should accept valid EOA signature");
     }
 
-    function test_returnsExpectedValue_withInvalidEOASignature(
-        uint128 wrongPk,
-        bytes32 message
-    ) public virtual {
+    function test_returnsExpectedValue_withInvalidEOASignature(uint128 wrongPk, bytes32 message) public virtual {
         vm.assume(wrongPk != 0);
         vm.assume(wrongPk != _EOA_PRIVATE_KEY);
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongPk, testHash);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
         assertEq(
             result,
             expectedInvalidSignatureResult(),
@@ -69,11 +61,7 @@ abstract contract IsValidSignatureTestBase is EIP7702ProxyBase {
      * @dev Abstract function that each implementation test must define
      * @return Expected result for invalid signature tests
      */
-    function expectedInvalidSignatureResult()
-        internal
-        pure
-        virtual
-        returns (bytes4);
+    function expectedInvalidSignatureResult() internal pure virtual returns (bytes4);
 }
 
 /**
@@ -81,46 +69,46 @@ abstract contract IsValidSignatureTestBase is EIP7702ProxyBase {
  */
 contract FailingImplementationTest is IsValidSignatureTestBase {
     function setUp() public override {
-        super.setUp();
-
-        // Override base setup to use FailingSignatureImplementation
+        // Deploy core contracts first
         _implementation = new FailingSignatureImplementation();
-        _initSelector = MockImplementation.initialize.selector;
+        _nonceTracker = new NonceTracker();
+        _receiver = new DefaultReceiver();
+        _validator = new MockValidator();
 
         _eoa = payable(vm.addr(_EOA_PRIVATE_KEY));
         _newOwner = payable(vm.addr(_NEW_OWNER_PRIVATE_KEY));
 
-        // Deploy and setup proxy
-        _proxy = new EIP7702Proxy(
-            address(_implementation),
-            _initSelector,
-            _nonceTracker
-        );
+        // Deploy proxy with receiver and nonce tracker
+        _proxy = new EIP7702Proxy(_nonceTracker, _receiver);
         bytes memory proxyCode = address(_proxy).code;
         vm.etch(_eoa, proxyCode);
 
-        // Initialize
+        // Initialize with implementation
         bytes memory initArgs = _createInitArgs(_newOwner);
-        bytes memory signature = _signInitData(_EOA_PRIVATE_KEY, initArgs);
-        EIP7702Proxy(_eoa).initialize(initArgs, signature, true);
+        bytes memory signature = _signSetImplementationData(
+            _EOA_PRIVATE_KEY,
+            address(_implementation),
+            0, // chainId 0 for cross-chain
+            initArgs
+        );
+
+        EIP7702Proxy(_eoa).setImplementation(
+            address(_implementation),
+            initArgs,
+            address(_validator),
+            signature,
+            true // Allow cross-chain replay for tests
+        );
+
+        super.setUp();
     }
 
-    function expectedInvalidSignatureResult()
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
+    function expectedInvalidSignatureResult() internal pure override returns (bytes4) {
         return ERC1271_FAIL_VALUE;
     }
 
-    function test_returnsFailureValue_withEmptySignature(
-        bytes32 message
-    ) public {
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            ""
-        );
+    function test_returnsFailureValue_withEmptySignature(bytes32 message) public {
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, "");
         assertEq(result, ERC1271_FAIL_VALUE, "Should reject empty signature");
     }
 
@@ -134,29 +122,13 @@ contract FailingImplementationTest is IsValidSignatureTestBase {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // We can use tryRecover directly to verify the exact error
-        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA
-            .tryRecover(message, signature);
-        assertEq(
-            recovered,
-            address(0),
-            "Recovered address should be zero for invalid signature"
-        );
-        assertEq(
-            uint8(error),
-            uint8(ECDSA.RecoverError.InvalidSignatureS),
-            "Should be InvalidSignatureS error"
-        );
+        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA.tryRecover(message, signature);
+        assertEq(recovered, address(0), "Recovered address should be zero for invalid signature");
+        assertEq(uint8(error), uint8(ECDSA.RecoverError.InvalidSignatureS), "Should be InvalidSignatureS error");
         assertEq(errorArg, s, "Error arg should be the invalid s value");
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
-        assertEq(
-            result,
-            ERC1271_FAIL_VALUE,
-            "Should reject signature with invalid s value"
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
+        assertEq(result, ERC1271_FAIL_VALUE, "Should reject signature with invalid s value");
     }
 
     function test_returnsFailureValue_withInvalidV(bytes32 message) public {
@@ -167,33 +139,13 @@ contract FailingImplementationTest is IsValidSignatureTestBase {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // Verify the exact error from tryRecover
-        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA
-            .tryRecover(message, signature);
-        assertEq(
-            recovered,
-            address(0),
-            "Recovered address should be zero for invalid signature"
-        );
-        assertEq(
-            uint8(error),
-            uint8(ECDSA.RecoverError.InvalidSignature),
-            "Should be InvalidSignature error"
-        );
-        assertEq(
-            errorArg,
-            bytes32(0),
-            "Error arg should be zero for invalid signature"
-        );
+        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA.tryRecover(message, signature);
+        assertEq(recovered, address(0), "Recovered address should be zero for invalid signature");
+        assertEq(uint8(error), uint8(ECDSA.RecoverError.InvalidSignature), "Should be InvalidSignature error");
+        assertEq(errorArg, bytes32(0), "Error arg should be zero for invalid signature");
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
-        assertEq(
-            result,
-            ERC1271_FAIL_VALUE,
-            "Should reject signature with invalid v value"
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
+        assertEq(result, ERC1271_FAIL_VALUE, "Should reject signature with invalid v value");
     }
 
     function test_returnsFailureValue_withInvalidR(bytes32 message) public {
@@ -204,33 +156,13 @@ contract FailingImplementationTest is IsValidSignatureTestBase {
         bytes memory signature = abi.encodePacked(r, s, v);
 
         // Verify the exact error from tryRecover
-        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA
-            .tryRecover(message, signature);
-        assertEq(
-            recovered,
-            address(0),
-            "Recovered address should be zero for invalid signature"
-        );
-        assertEq(
-            uint8(error),
-            uint8(ECDSA.RecoverError.InvalidSignature),
-            "Should be InvalidSignature error"
-        );
-        assertEq(
-            errorArg,
-            bytes32(0),
-            "Error arg should be zero for invalid signature"
-        );
+        (address recovered, ECDSA.RecoverError error, bytes32 errorArg) = ECDSA.tryRecover(message, signature);
+        assertEq(recovered, address(0), "Recovered address should be zero for invalid signature");
+        assertEq(uint8(error), uint8(ECDSA.RecoverError.InvalidSignature), "Should be InvalidSignature error");
+        assertEq(errorArg, bytes32(0), "Error arg should be zero for invalid signature");
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
-        assertEq(
-            result,
-            ERC1271_FAIL_VALUE,
-            "Should reject signature with invalid r value"
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
+        assertEq(result, ERC1271_FAIL_VALUE, "Should reject signature with invalid r value");
     }
 }
 
@@ -239,51 +171,41 @@ contract FailingImplementationTest is IsValidSignatureTestBase {
  */
 contract SucceedingImplementationTest is IsValidSignatureTestBase {
     function setUp() public override {
-        super.setUp();
-
-        // Override base implementation with standard MockImplementation (always succeeds)
+        // Deploy core contracts first
         _implementation = new MockImplementation();
-        _initSelector = MockImplementation.initialize.selector;
+        _nonceTracker = new NonceTracker();
+        _receiver = new DefaultReceiver();
+        _validator = new MockValidator();
 
         _eoa = payable(vm.addr(_EOA_PRIVATE_KEY));
         _newOwner = payable(vm.addr(_NEW_OWNER_PRIVATE_KEY));
 
-        // Deploy and setup proxy
-        _proxy = new EIP7702Proxy(
-            address(_implementation),
-            _initSelector,
-            _nonceTracker
-        );
+        // Deploy proxy with receiver and nonce tracker
+        _proxy = new EIP7702Proxy(_nonceTracker, _receiver);
         bytes memory proxyCode = address(_proxy).code;
         vm.etch(_eoa, proxyCode);
 
-        // Initialize
+        // Initialize with implementation
         bytes memory initArgs = _createInitArgs(_newOwner);
-        bytes memory signature = _signInitData(_EOA_PRIVATE_KEY, initArgs);
-        EIP7702Proxy(_eoa).initialize(initArgs, signature, true);
+        bytes memory signature = _signSetImplementationData(
+            _EOA_PRIVATE_KEY,
+            address(_implementation),
+            0, // chainId 0 for cross-chain
+            initArgs
+        );
+
+        EIP7702Proxy(_eoa).setImplementation(address(_implementation), initArgs, address(_validator), signature, true);
+
+        super.setUp();
     }
 
-    function expectedInvalidSignatureResult()
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
+    function expectedInvalidSignatureResult() internal pure override returns (bytes4) {
         return ERC1271_MAGIC_VALUE; // Implementation always returns success
     }
 
-    function test_returnsSuccessValue_withEmptySignature(
-        bytes32 message
-    ) public {
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            ""
-        );
-        assertEq(
-            result,
-            ERC1271_MAGIC_VALUE,
-            "Should return success for any EOA signature"
-        );
+    function test_returnsSuccessValue_withEmptySignature(bytes32 message) public {
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, "");
+        assertEq(result, ERC1271_MAGIC_VALUE, "Should return success for any EOA signature");
     }
 }
 
@@ -292,36 +214,35 @@ contract SucceedingImplementationTest is IsValidSignatureTestBase {
  */
 contract RevertingImplementationTest is IsValidSignatureTestBase {
     function setUp() public override {
-        super.setUp();
-
-        // Override base setup to use RevertingIsValidSignatureImplementation
+        // Deploy core contracts first
         _implementation = new RevertingIsValidSignatureImplementation();
-        _initSelector = MockImplementation.initialize.selector;
+        _nonceTracker = new NonceTracker();
+        _receiver = new DefaultReceiver();
+        _validator = new MockValidator();
 
         _eoa = payable(vm.addr(_EOA_PRIVATE_KEY));
         _newOwner = payable(vm.addr(_NEW_OWNER_PRIVATE_KEY));
 
-        // Deploy and setup proxy
-        _proxy = new EIP7702Proxy(
-            address(_implementation),
-            _initSelector,
-            _nonceTracker
-        );
+        // Deploy proxy with receiver and nonce tracker
+        _proxy = new EIP7702Proxy(_nonceTracker, _receiver);
         bytes memory proxyCode = address(_proxy).code;
         vm.etch(_eoa, proxyCode);
 
-        // Initialize
+        // Initialize with implementation
         bytes memory initArgs = _createInitArgs(_newOwner);
-        bytes memory signature = _signInitData(_EOA_PRIVATE_KEY, initArgs);
-        EIP7702Proxy(_eoa).initialize(initArgs, signature, true);
+        bytes memory signature = _signSetImplementationData(
+            _EOA_PRIVATE_KEY,
+            address(_implementation),
+            0, // chainId 0 for cross-chain
+            initArgs
+        );
+
+        EIP7702Proxy(_eoa).setImplementation(address(_implementation), initArgs, address(_validator), signature, true);
+
+        super.setUp();
     }
 
-    function expectedInvalidSignatureResult()
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
+    function expectedInvalidSignatureResult() internal pure override returns (bytes4) {
         return ERC1271_FAIL_VALUE;
     }
 }
@@ -334,13 +255,8 @@ contract ExtraDataTest is IsValidSignatureTestBase {
         MockImplementationWithExtraData mock = new MockImplementationWithExtraData();
 
         // Call isValidSignature and capture the raw return data
-        (bool success, bytes memory returnData) = address(mock).staticcall(
-            abi.encodeWithSelector(
-                mock.isValidSignature.selector,
-                bytes32(0),
-                new bytes(0)
-            )
-        );
+        (bool success, bytes memory returnData) =
+            address(mock).staticcall(abi.encodeWithSelector(mock.isValidSignature.selector, bytes32(0), new bytes(0)));
 
         require(success, "Call failed");
         require(returnData.length == 32, "Should return 32 bytes");
@@ -354,37 +270,35 @@ contract ExtraDataTest is IsValidSignatureTestBase {
     }
 
     function setUp() public override {
-        // Override base setup to use MockImplementationWithExtraData
+        // Deploy core contracts first
         _implementation = new MockImplementationWithExtraData();
         _nonceTracker = new NonceTracker();
-        _initSelector = MockImplementation.initialize.selector;
+        _receiver = new DefaultReceiver();
+        _validator = new MockValidator();
 
         _eoa = payable(vm.addr(_EOA_PRIVATE_KEY));
         _newOwner = payable(vm.addr(_NEW_OWNER_PRIVATE_KEY));
 
-        // Deploy and setup proxy
-        _proxy = new EIP7702Proxy(
-            address(_implementation),
-            _initSelector,
-            _nonceTracker
-        );
+        // Deploy proxy with receiver and nonce tracker
+        _proxy = new EIP7702Proxy(_nonceTracker, _receiver);
         bytes memory proxyCode = address(_proxy).code;
         vm.etch(_eoa, proxyCode);
 
-        // Initialize
+        // Initialize with implementation
         bytes memory initArgs = _createInitArgs(_newOwner);
-        bytes memory signature = _signInitData(_EOA_PRIVATE_KEY, initArgs);
-        EIP7702Proxy(_eoa).initialize(initArgs, signature, true);
+        bytes memory signature = _signSetImplementationData(
+            _EOA_PRIVATE_KEY,
+            address(_implementation),
+            0, // chainId 0 for cross-chain
+            initArgs
+        );
+
+        EIP7702Proxy(_eoa).setImplementation(address(_implementation), initArgs, address(_validator), signature, true);
 
         super.setUp();
     }
 
-    function expectedInvalidSignatureResult()
-        internal
-        pure
-        override
-        returns (bytes4)
-    {
+    function expectedInvalidSignatureResult() internal pure override returns (bytes4) {
         return ERC1271_MAGIC_VALUE; // Implementation always returns success (with extra data)
     }
 
@@ -392,14 +306,7 @@ contract ExtraDataTest is IsValidSignatureTestBase {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(_EOA_PRIVATE_KEY, message);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(
-            message,
-            signature
-        );
-        assertEq(
-            result,
-            ERC1271_MAGIC_VALUE,
-            "Should accept signature even with extra return data"
-        );
+        bytes4 result = MockImplementation(payable(wallet)).isValidSignature(message, signature);
+        assertEq(result, ERC1271_MAGIC_VALUE, "Should accept signature even with extra return data");
     }
 }

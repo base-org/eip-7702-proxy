@@ -6,9 +6,9 @@ import {EIP7702Proxy} from "../../src/EIP7702Proxy.sol";
 import {MockERC721} from "../mocks/MockERC721.sol";
 import {MockERC1155} from "../mocks/MockERC1155.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {CoinbaseImplementationTest} from "./coinbaseImplementation.t.sol";
+import {EIP7702ProxyBase} from "../base/EIP7702ProxyBase.sol";
 
-contract TokenReceiveTest is CoinbaseImplementationTest {
+contract TokenReceiveTest is EIP7702ProxyBase {
     MockERC721 public nft;
     MockERC1155 public multiToken;
     MockERC20 public token;

@@ -3,9 +3,10 @@ pragma solidity ^0.8.23;
 
 import {EIP7702Proxy} from "../../src/EIP7702Proxy.sol";
 import {NonceTracker} from "../../src/NonceTracker.sol";
+import {DefaultReceiver} from "../../src/DefaultReceiver.sol";
+import {MockValidator} from "../mocks/MockValidator.sol";
 
 import {ECDSA} from "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
-
 import {Test} from "forge-std/Test.sol";
 import {MockImplementation} from "../mocks/MockImplementation.sol";
 
@@ -15,8 +16,11 @@ import {MockImplementation} from "../mocks/MockImplementation.sol";
  */
 abstract contract EIP7702ProxyBase is Test {
     /// @dev Storage slot with the address of the current implementation (ERC1967)
-    bytes32 internal constant IMPLEMENTATION_SLOT =
-        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+    bytes32 internal constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    bytes32 internal constant _IMPLEMENTATION_SET_TYPEHASH = keccak256(
+        "EIP7702ProxyImplementationSet(uint256 chainId,address proxy,uint256 nonce,address currentImplementation,address newImplementation,bytes callData,address validator)"
+    );
 
     /// @dev Test account private keys and addresses
     uint256 internal constant _EOA_PRIVATE_KEY = 0xA11CE;
@@ -29,26 +33,23 @@ abstract contract EIP7702ProxyBase is Test {
     EIP7702Proxy internal _proxy;
     MockImplementation internal _implementation;
     NonceTracker internal _nonceTracker;
+    DefaultReceiver internal _receiver;
+    MockValidator internal _validator;
 
-    /// @dev Function selector for initialization
-    bytes4 internal _initSelector;
-
+    /// @dev "deploy" the proxy at the EOA but don't initialize
     function setUp() public virtual {
         // Set up test accounts
         _eoa = payable(vm.addr(_EOA_PRIVATE_KEY));
         _newOwner = payable(vm.addr(_NEW_OWNER_PRIVATE_KEY));
 
-        // Deploy implementation and nonce tracker
+        // Deploy core contracts
         _implementation = new MockImplementation();
         _nonceTracker = new NonceTracker();
-        _initSelector = MockImplementation.initialize.selector;
+        _receiver = new DefaultReceiver();
+        _validator = new MockValidator();
 
-        // Deploy proxy normally first to get the correct immutable values
-        _proxy = new EIP7702Proxy(
-            address(_implementation),
-            _initSelector,
-            _nonceTracker
-        );
+        // Deploy proxy with receiver and nonce tracker
+        _proxy = new EIP7702Proxy(_nonceTracker, _receiver);
 
         // Get the proxy's runtime code
         bytes memory proxyCode = address(_proxy).code;
@@ -57,29 +58,55 @@ abstract contract EIP7702ProxyBase is Test {
         vm.etch(_eoa, proxyCode);
     }
 
+    /// @dev Initialize the proxy with the new owner
+    function _initializeProxy() internal {
+        bytes memory initArgs = _createInitArgs(_newOwner);
+        bytes memory signature = _signSetImplementationData(
+            _EOA_PRIVATE_KEY,
+            address(_implementation),
+            0, // chainId 0 for cross-chain
+            initArgs
+        );
+
+        EIP7702Proxy(_eoa).setImplementation(
+            address(_implementation),
+            initArgs,
+            address(_validator),
+            signature,
+            true // Allow cross-chain replay for tests
+        );
+    }
+
     /**
      * @dev Helper to generate initialization signature
      * @param signerPk Private key of the signer
-     * @param initArgs Initialization arguments to sign
+     * @param newImplementationAddress New implementation contract address
+     * @param chainId Chain ID for the signature
+     * @param callData Initialization data for the implementation
      * @return Signature bytes
      */
-    function _signInitData(
+    function _signSetImplementationData(
         uint256 signerPk,
-        bytes memory initArgs
+        address newImplementationAddress,
+        uint256 chainId,
+        bytes memory callData
     ) internal view returns (bytes memory) {
-        bytes32 _INITIALIZATION_TYPEHASH = keccak256(
-            "EIP7702ProxyInitialization(uint256 chainId,address proxy,uint256 nonce,bytes args)"
-        );
         uint256 nonce = _nonceTracker.nonces(_eoa);
+        address currentImpl = _getERC1967Implementation(_eoa);
+
         bytes32 initHash = keccak256(
             abi.encode(
-                _INITIALIZATION_TYPEHASH,
-                0,
+                _IMPLEMENTATION_SET_TYPEHASH,
+                chainId,
                 _proxy,
                 nonce,
-                keccak256(initArgs)
+                currentImpl,
+                newImplementationAddress,
+                keccak256(callData),
+                address(_validator)
             )
         );
+
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPk, initHash);
         return abi.encodePacked(r, s, v);
     }
@@ -89,10 +116,9 @@ abstract contract EIP7702ProxyBase is Test {
      * @param owner Address to set as owner
      * @return Encoded initialization arguments
      */
-    function _createInitArgs(
-        address owner
-    ) internal pure returns (bytes memory) {
-        return abi.encode(owner);
+    function _createInitArgs(address owner) internal pure returns (bytes memory) {
+        // Encode the complete function call: initialize(address)
+        return abi.encodeWithSelector(MockImplementation.initialize.selector, owner);
     }
 
     /**
@@ -100,9 +126,7 @@ abstract contract EIP7702ProxyBase is Test {
      * @param proxy Address of the proxy contract to read from
      * @return The implementation address stored in the ERC1967 slot
      */
-    function _getERC1967Implementation(
-        address proxy
-    ) internal view returns (address) {
+    function _getERC1967Implementation(address proxy) internal view returns (address) {
         return address(uint160(uint256(vm.load(proxy, IMPLEMENTATION_SLOT))));
     }
 

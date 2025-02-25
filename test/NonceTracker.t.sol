@@ -17,11 +17,7 @@ contract NonceTrackerTest is Test {
     }
 
     function test_nonces_initialNonceIsZero() public {
-        assertEq(
-            nonceTracker.nonces(account),
-            0,
-            "Initial nonce should be zero"
-        );
+        assertEq(nonceTracker.nonces(account), 0, "Initial nonce should be zero");
     }
 
     function test_useNonce_incrementsNonce_afterVerification() public {
@@ -29,11 +25,7 @@ contract NonceTrackerTest is Test {
 
         vm.prank(account);
         nonceTracker.useNonce();
-        assertEq(
-            nonceTracker.nonces(account),
-            nonce + 1,
-            "Nonce should increment after use"
-        );
+        assertEq(nonceTracker.nonces(account), nonce + 1, "Nonce should increment after use");
     }
 
     function test_useNonce_emitsEvent_whenNonceUsed() public {
@@ -45,17 +37,11 @@ contract NonceTrackerTest is Test {
         nonceTracker.useNonce();
     }
 
-    function test_nonces_maintainsCorrectNonce_afterMultipleIncrements(
-        uint8 incrementCount
-    ) public {
+    function test_nonces_maintainsCorrectNonce_afterMultipleIncrements(uint8 incrementCount) public {
         uint256 expectedNonce = 0;
 
         for (uint256 i = 0; i < incrementCount; i++) {
-            assertEq(
-                nonceTracker.nonces(account),
-                expectedNonce,
-                "Incorrect nonce before increment"
-            );
+            assertEq(nonceTracker.nonces(account), expectedNonce, "Incorrect nonce before increment");
 
             vm.prank(account);
             nonceTracker.useNonce();
@@ -63,16 +49,10 @@ contract NonceTrackerTest is Test {
             expectedNonce++;
         }
 
-        assertEq(
-            nonceTracker.nonces(account),
-            expectedNonce,
-            "Final nonce incorrect"
-        );
+        assertEq(nonceTracker.nonces(account), expectedNonce, "Final nonce incorrect");
     }
 
-    function test_nonces_tracksNoncesIndependently_forDifferentAccounts(
-        address otherAccount
-    ) public {
+    function test_nonces_tracksNoncesIndependently_forDifferentAccounts(address otherAccount) public {
         vm.assume(otherAccount != account);
 
         // Use account's nonce
@@ -81,10 +61,6 @@ contract NonceTrackerTest is Test {
         nonceTracker.useNonce();
 
         // Other account's nonce should still be 0
-        assertEq(
-            nonceTracker.nonces(otherAccount),
-            0,
-            "Other account's nonce should be independent"
-        );
+        assertEq(nonceTracker.nonces(otherAccount), 0, "Other account's nonce should be independent");
     }
 }
