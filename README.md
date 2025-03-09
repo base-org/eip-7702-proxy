@@ -45,7 +45,7 @@ The EIP-7702 Proxy provides a secure way to upgrade EOAs to smart contract walle
 - Reverts invalid state transitions
 
 ### DefaultReceiver
-- Inherits from Solady's `Receiver`
+- Inherits from Solady `Receiver`
 - Provides a default implementation for token compatibility
 
 ## Usage
